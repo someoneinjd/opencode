@@ -392,6 +392,10 @@ export type TuiState = {
     status: (sessionID: string) => SessionStatus | undefined
     permission: (sessionID: string) => ReadonlyArray<PermissionRequest>
     question: (sessionID: string) => ReadonlyArray<QuestionRequest>
+    /** Returns the cached cost rollup for `sessionID`, or `undefined` if none has been fetched yet. */
+    cost: (sessionID: string) => TuiSessionCost | undefined
+    /** Triggers an asynchronous refresh of the cost rollup for `sessionID`. */
+    refreshCost: (sessionID: string) => void
   }
   part: (messageID: string) => ReadonlyArray<Part>
   lsp: () => ReadonlyArray<TuiSidebarLspItem>
@@ -440,6 +444,15 @@ export type TuiSidebarMcpItem = {
   name: string
   status: McpStatus["status"]
   error?: string
+}
+
+export type TuiSessionCost = {
+  /** Cumulative cost of assistant messages on this session only. */
+  readonly self: number
+  /** Cumulative cost of assistant messages across all descendant sessions. */
+  readonly subagents: number
+  /** Number of descendant sessions contributing to `subagents`. */
+  readonly subagent_count: number
 }
 
 export type TuiSidebarLspItem = Pick<LspStatus, "id" | "root" | "status">

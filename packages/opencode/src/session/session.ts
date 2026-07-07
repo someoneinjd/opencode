@@ -276,6 +276,16 @@ export const ForkInput = Schema.Struct({
 })
 export const GetInput = SessionID
 export const ChildrenInput = SessionID
+export const CostInput = SessionID
+export const Cost = Schema.Struct({
+  /** Cumulative cost of assistant messages on this session only. */
+  self: Schema.Finite,
+  /** Cumulative cost of assistant messages across all descendant sessions (subagents and their descendants). */
+  subagents: Schema.Finite,
+  /** Number of descendant sessions contributing to `subagents`. */
+  subagent_count: NonNegativeInt,
+})
+export type Cost = Schema.Schema.Type<typeof Cost>
 export const RemoveInput = SessionID
 export const SetTitleInput = Schema.Struct({ sessionID: SessionID, title: Schema.String })
 export const SetArchivedInput = Schema.Struct({
@@ -449,6 +459,7 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  readonly cost: (sessionID: SessionID) => Effect.Effect<Cost, NotFound>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -603,6 +614,35 @@ const layer: Layer.Layer<
         .all()
         .pipe(Effect.orDie)
       return rows.map(fromRow)
+    })
+
+    const cost: Interface["cost"] = Effect.fn("Session.cost")(function* (sessionID: SessionID) {
+      const session = yield* get(sessionID)
+      const descendants: SessionID[] = []
+      const descendantCosts: number[] = []
+      const queue: SessionID[] = [sessionID]
+      const seen = new Set<SessionID>([sessionID])
+      while (queue.length > 0) {
+        const parents = queue.splice(0, queue.length)
+        const rows = yield* db
+          .select({ id: SessionTable.id, cost: SessionTable.cost })
+          .from(SessionTable)
+          .where(inArray(SessionTable.parent_id, parents))
+          .all()
+          .pipe(Effect.orDie)
+        for (const row of rows) {
+          if (seen.has(row.id)) continue
+          seen.add(row.id)
+          descendants.push(row.id)
+          descendantCosts.push(row.cost)
+          queue.push(row.id)
+        }
+      }
+      return {
+        self: session.cost ?? 0,
+        subagents: descendantCosts.reduce((sum, value) => sum + value, 0),
+        subagent_count: descendants.length,
+      }
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -925,6 +965,7 @@ const layer: Layer.Layer<
       diff,
       messages,
       children,
+      cost,
       remove,
       updateMessage,
       removeMessage,

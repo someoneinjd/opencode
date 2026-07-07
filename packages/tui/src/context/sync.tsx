@@ -87,6 +87,9 @@ export const {
       session_diff: {
         [sessionID: string]: SnapshotFileDiff[]
       }
+      session_cost: {
+        [sessionID: string]: { self: number; subagents: number; subagent_count: number }
+      }
       todo: {
         [sessionID: string]: Todo[]
       }
@@ -127,6 +130,7 @@ export const {
       session: [],
       session_status: {},
       session_diff: {},
+      session_cost: {},
       todo: {},
       message: {},
       part: {},
@@ -149,6 +153,25 @@ export const {
     }
     const touchPart = (sessionID: string, partID: string) => {
       hydratingSessions.get(sessionID)?.parts.add(partID)
+    }
+    const inflightCostRefresh = new Map<string, boolean>()
+
+    async function refreshCost(sessionID: string) {
+      if (inflightCostRefresh.has(sessionID)) {
+        inflightCostRefresh.set(sessionID, true)
+        return
+      }
+      inflightCostRefresh.set(sessionID, false)
+      try {
+        const response = await sdk.client.session.cost({ sessionID })
+        if (response.data) setStore("session_cost", sessionID, response.data)
+      } catch {
+        // Ignore transient errors; sidebar will keep last known value.
+      } finally {
+        const pending = inflightCostRefresh.get(sessionID)
+        inflightCostRefresh.delete(sessionID)
+        if (pending) void refreshCost(sessionID)
+      }
     }
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
@@ -314,6 +337,18 @@ export const {
 
         case "message.updated": {
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
+          // When an assistant message completes, refresh any cached cost
+          // rollups. This catches subagent completions for ancestor sidebars
+          // without tracking parent_id chains client-side.
+          if (
+            event.properties.info.role === "assistant" &&
+            event.properties.info.time?.completed &&
+            (event.properties.info.cost ?? 0) > 0
+          ) {
+            for (const id of Object.keys(store.session_cost)) {
+              void refreshCost(id)
+            }
+          }
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
@@ -585,6 +620,14 @@ export const {
           if (last.role === "user") return "working"
           return last.time.completed ? "idle" : "working"
         },
+        cost(sessionID: string) {
+          // Returns the last fetched value (or undefined). The caller is
+          // expected to have triggered `syncCost` for this session.
+          return store.session_cost[sessionID]
+        },
+        syncCost(sessionID: string) {
+          return refreshCost(sessionID)
+        },
         async sync(sessionID: string) {
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
@@ -650,6 +693,7 @@ export const {
                 draft.session_diff[sessionID] = diff.data ?? []
               }),
             )
+            void refreshCost(sessionID)
             fullSyncedSessions.add(sessionID)
           })().finally(() => {
             syncingSessions.delete(sessionID)

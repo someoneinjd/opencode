@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createMemo } from "solid-js"
+import { createEffect, createMemo } from "solid-js"
 
 const id = "internal:sidebar-context"
 
@@ -13,8 +13,24 @@ const money = new Intl.NumberFormat("en-US", {
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
-  const session = createMemo(() => props.api.state.session.get(props.session_id))
-  const cost = createMemo(() => session()?.cost ?? 0)
+
+  // Fetch the cost rollup whenever the session changes; the rollup is
+  // refreshed automatically when descendant sessions complete an assistant turn.
+  createEffect(() => {
+    const id = props.session_id
+    if (!id) return
+    props.api.state.session.refreshCost(id)
+  })
+
+  // Prefer the server-side rollup (which includes the parent's own cost). Fall
+  // back to summing local messages so we still render before the first fetch
+  // resolves.
+  const cost = createMemo(() => {
+    const rollup = props.api.state.session.cost(props.session_id)
+    if (rollup) return { self: rollup.self, subagents: rollup.subagents, subagent_count: rollup.subagent_count }
+    const self = props.api.state.session.get(props.session_id)?.cost ?? msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+    return { self, subagents: 0, subagent_count: 0 }
+  })
 
   const state = createMemo(() => {
     const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
@@ -34,6 +50,14 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     }
   })
 
+  const costLine = createMemo(() => {
+    const c = cost()
+    if (c.subagent_count > 0) {
+      return `${money.format(c.self + c.subagents)} (${money.format(c.subagents)} subagents) spent`
+    }
+    return `${money.format(c.self)} spent`
+  })
+
   return (
     <box>
       <text fg={theme().text}>
@@ -41,7 +65,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       </text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
-      <text fg={theme().textMuted}>{money.format(cost())} spent</text>
+      <text fg={theme().textMuted}>{costLine()}</text>
     </box>
   )
 }

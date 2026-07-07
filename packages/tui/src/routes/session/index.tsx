@@ -154,6 +154,8 @@ const sessionGlobalBindingCommands = [
 
 const sessionGlobalUnfocusedBindingCommands = ["session.first", "session.last"] as const
 
+const taskMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+
 const context = createContext<{
   width: number
   sessionID: string
@@ -2218,7 +2220,9 @@ function Task(props: ToolProps) {
 
   onMount(() => {
     const sessionID = stringValue(props.metadata.sessionId)
-    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
+    if (!sessionID) return
+    void sync.session.syncCost(sessionID)
+    if (!sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
   })
 
   const sessionID = createMemo(() => stringValue(props.metadata.sessionId))
@@ -2257,6 +2261,17 @@ function Task(props: ToolProps) {
     return assistant - first
   })
 
+  // Total cost of this subagent task (includes its own descendant subagents).
+  // Falls back to summing the locally-cached child messages until the
+  // server-side rollup arrives.
+  const totalCost = createMemo(() => {
+    const id = stringValue(props.metadata.sessionId)
+    if (!id) return 0
+    const rollup = sync.data.session_cost[id]
+    if (rollup) return rollup.self + rollup.subagents
+    return messages().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+  })
+
   const content = createMemo(() => {
     const description = stringValue(props.input.description)
     if (!description) return ""
@@ -2280,7 +2295,9 @@ function Task(props: ToolProps) {
     }
 
     if (!isRunning() && props.part.state.status === "completed") {
-      content.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}`)
+      const cost = totalCost()
+      const costSuffix = cost > 0 ? ` · ${taskMoney.format(cost)}` : ""
+      content.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}${costSuffix}`)
     }
 
     return content.join("\n")
